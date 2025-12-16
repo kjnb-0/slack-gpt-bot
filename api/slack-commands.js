@@ -1,12 +1,15 @@
 import crypto from "crypto";
 import OpenAI from "openai";
 
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
 // Verify Slack signature
 function verifySlackRequest(req, body) {
   const slackSignature = req.headers["x-slack-signature"];
   const slackTimestamp = req.headers["x-slack-request-timestamp"];
   const fiveMinutesAgo = Math.floor(Date.now() / 1000) - 60 * 5;
 
+  if (!slackSignature || !slackTimestamp) return false;
   if (slackTimestamp < fiveMinutesAgo) return false;
 
   const sigBasestring = `v0:${slackTimestamp}:${body}`;
@@ -17,25 +20,28 @@ function verifySlackRequest(req, body) {
       .update(sigBasestring, "utf8")
       .digest("hex");
 
-  return crypto.timingSafeEqual(
-    Buffer.from(mySig, "utf8"),
-    Buffer.from(slackSignature, "utf8")
-  );
+  try {
+    return crypto.timingSafeEqual(
+      Buffer.from(mySig, "utf8"),
+      Buffer.from(slackSignature, "utf8")
+    );
+  } catch {
+    return false;
+  }
 }
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).send("Method Not Allowed");
   }
 
-  const rawBody = req.body ? req.body.toString() : "";
+  // Vercel usually gives you the raw body as a string for url-encoded posts
+  const rawBody = typeof req.body === "string" ? req.body : req.body.toString();
+
   if (!verifySlackRequest(req, rawBody)) {
     return res.status(400).send("Invalid signature");
   }
 
-  // Slack sends body as URL-encoded string; parse it:
   const params = new URLSearchParams(rawBody);
   const command = params.get("command");
   const text = params.get("text") || "";
@@ -51,24 +57,32 @@ Role details:
 "${text}"
 `;
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
-      messages: [
-        {
-          role: "system",
-          content: "You help recruiters generate precise Boolean search strings."
-        },
-        { role: "user", content: prompt }
-      ],
-      temperature: 0.3
-    });
+    try {
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4.1-mini",
+        messages: [
+          {
+            role: "system",
+            content: "You help recruiters generate precise Boolean search strings."
+          },
+          { role: "user", content: prompt }
+        ],
+        temperature: 0.3
+      });
 
-    const reply = completion.choices[0].message.content;
+      const reply = completion.choices[0].message.content;
 
-    return res.status(200).json({
-      response_type: "ephemeral",
-      text: reply
-    });
+      return res.status(200).json({
+        response_type: "ephemeral",
+        text: reply
+      });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({
+        response_type: "ephemeral",
+        text: "Error talking to OpenAI"
+      });
+    }
   }
 
   return res.status(200).json({
