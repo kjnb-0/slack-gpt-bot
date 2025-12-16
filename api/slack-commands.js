@@ -1,12 +1,7 @@
 // api/slack-commands.js
-import OpenAI from "openai";
-
-// OpenAI client using your Vercel env var
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // Helper: normalize Slack's POST body into a plain object
 function parseSlackBody(req) {
-  // Vercel may give us a string or already-parsed object
   if (typeof req.body === "string") {
     const params = new URLSearchParams(req.body);
     return Object.fromEntries(params);
@@ -16,14 +11,13 @@ function parseSlackBody(req) {
     return req.body;
   }
 
-  // Fallback: try to parse as URL-encoded from buffer
   const raw = req.body ? req.body.toString() : "";
   const params = new URLSearchParams(raw);
   return Object.fromEntries(params);
 }
 
 export default async function handler(req, res) {
-  // Simple check for browser / health
+  // Health check / browser test
   if (req.method !== "POST") {
     return res.status(200).send("OK");
   }
@@ -33,7 +27,6 @@ export default async function handler(req, res) {
   const text = body.text || "";
   const user = body.user_name || "there";
 
-  // Only handle /boolean for now
   if (command !== "/boolean") {
     return res.status(200).json({
       response_type: "ephemeral",
@@ -41,7 +34,6 @@ export default async function handler(req, res) {
     });
   }
 
-  // If they didn’t pass any text, nudge them
   if (!text.trim()) {
     return res.status(200).json({
       response_type: "ephemeral",
@@ -51,7 +43,35 @@ export default async function handler(req, res) {
     });
   }
 
-  // Prompt we send to GPT
+  // 🔹 1) Try to load the OpenAI library dynamically
+  let OpenAI;
+  try {
+    ({ default: OpenAI } = await import("openai"));
+  } catch (err) {
+    console.error("Failed to import openai:", err);
+    return res.status(200).json({
+      response_type: "ephemeral",
+      text:
+        "Server misconfigured: the `openai` library is not available. " +
+        "Make sure `openai` is in package.json and Vercel deployed successfully."
+    });
+  }
+
+  // 🔹 2) Check API key
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    console.error("Missing OPENAI_API_KEY environment variable");
+    return res.status(200).json({
+      response_type: "ephemeral",
+      text:
+        "Server misconfigured: OPENAI_API_KEY is not set in Vercel. " +
+        "Add it under Project → Settings → Environment Variables."
+    });
+  }
+
+  const openai = new OpenAI({ apiKey });
+
+  // 🔹 3) Build the prompt and call OpenAI
   const prompt = `
 You are a senior technical sourcer at a boutique search firm (Ingenium Search).
 Convert the user's role description into clear, usable Boolean search strings for sourcing technical candidates.
@@ -86,10 +106,10 @@ Role details:
       temperature: 0.3
     });
 
-    const reply = completion.choices[0].message.content || "";
+    const reply = completion.choices?.[0]?.message?.content || "(no response)";
 
     return res.status(200).json({
-      response_type: "ephemeral", // only the user sees this
+      response_type: "ephemeral",
       text: `Hi ${user}, here are your Boolean suggestions:\n\n${reply}`
     });
   } catch (err) {
@@ -98,7 +118,7 @@ Role details:
       response_type: "ephemeral",
       text:
         "Sorry, something went wrong talking to OpenAI. " +
-        "Double-check that OPENAI_API_KEY is set correctly in Vercel."
+        "Check the Vercel logs for details and verify your API key and model."
     });
   }
 }
